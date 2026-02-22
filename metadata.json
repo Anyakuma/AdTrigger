@@ -1,0 +1,7 @@
+{
+  "name": "AdTrigger: Offline Audio Monitor",
+  "description": "Automated radio ad recorder with local keyword detection and offline-first recording capabilities.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
