@@ -32,18 +32,72 @@ interface Recording {
   duration: number;
 }
 
+// Helper to convert Blob to Base64
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
+
+// Helper to convert Base64 to Blob
+const base64ToBlob = async (base64: string): Promise<Blob> => {
+  const res = await fetch(base64);
+  return res.blob();
+};
+
 // --- Components ---
 
 export default function App() {
   // State
   const [isListening, setIsListening] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [keywords, setKeywords] = useState<string[]>(['Guinness', 'Hennessy', 'Promotion', 'Sale']);
+  const [keywords, setKeywords] = useState<string[]>([]);
   const [newKeyword, setNewKeyword] = useState('');
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [lastDetected, setLastDetected] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // --- Data Sync ---
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [kwRes, recRes] = await Promise.all([
+          fetch('/api/keywords'),
+          fetch('/api/recordings')
+        ]);
+        
+        if (kwRes.ok) {
+          const kwData = await kwRes.json();
+          setKeywords(kwData);
+        }
+        
+        if (recRes.ok) {
+          const recData = await recRes.json();
+          const parsedRecordings: Recording[] = await Promise.all(
+            recData.map(async (r: any) => {
+              const blob = await base64ToBlob(r.audioBase64);
+              return {
+                id: r.id,
+                blob,
+                url: URL.createObjectURL(blob),
+                timestamp: new Date(r.timestamp),
+                triggerWord: r.triggerWord,
+                duration: r.duration
+              };
+            })
+          );
+          setRecordings(parsedRecordings);
+        }
+      } catch (err) {
+        console.error("Failed to fetch data:", err);
+      }
+    };
+    fetchData();
+  }, []);
 
   // Refs
   const recognitionRef = useRef<any>(null);
@@ -107,7 +161,7 @@ export default function App() {
           }
         };
 
-        mediaRecorder.onstop = () => {
+        mediaRecorder.onstop = async () => {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
           const audioUrl = URL.createObjectURL(audioBlob);
           const newRecording: Recording = {
@@ -119,15 +173,34 @@ export default function App() {
             duration: (Date.now() - recordingStartTimeRef.current) / 1000
           };
           setRecordings(prev => [newRecording, ...prev]);
+
+          // Sync to backend
+          try {
+            const base64 = await blobToBase64(audioBlob);
+            await fetch('/api/recordings', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: newRecording.id,
+                triggerWord: newRecording.triggerWord,
+                duration: newRecording.duration,
+                timestamp: newRecording.timestamp.toISOString(),
+                audioBase64: base64,
+                size: audioBlob.size
+              })
+            });
+          } catch (err) {
+            console.error("Failed to sync recording:", err);
+          }
         };
 
         mediaRecorder.start();
         setIsRecording(true);
 
-        // Auto-stop after 15 seconds (typical ad segment length)
+        // Auto-stop after 30 seconds (typical ad segment length)
         setTimeout(() => {
           stopRecording();
-        }, 15000);
+        }, 30000);
       })
       .catch(err => {
         console.error("Error accessing microphone:", err);
@@ -187,16 +260,44 @@ export default function App() {
 
   // --- Keyword Management ---
 
-  const addKeyword = (e: React.FormEvent) => {
+  const addKeyword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newKeyword && !keywords.includes(newKeyword)) {
-      setKeywords([...keywords, newKeyword]);
+      const word = newKeyword;
+      setKeywords([...keywords, word]);
       setNewKeyword('');
+      try {
+        await fetch('/api/keywords', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ word })
+        });
+      } catch (err) {
+        console.error("Failed to add keyword:", err);
+      }
     }
   };
 
-  const removeKeyword = (word: string) => {
+  const removeKeyword = async (word: string) => {
     setKeywords(keywords.filter(k => k !== word));
+    try {
+      await fetch(`/api/keywords/${encodeURIComponent(word)}`, {
+        method: 'DELETE'
+      });
+    } catch (err) {
+      console.error("Failed to remove keyword:", err);
+    }
+  };
+
+  const deleteRecording = async (id: string) => {
+    setRecordings(prev => prev.filter(r => r.id !== id));
+    try {
+      await fetch(`/api/recordings/${id}`, {
+        method: 'DELETE'
+      });
+    } catch (err) {
+      console.error("Failed to delete recording:", err);
+    }
   };
 
   return (
@@ -381,7 +482,7 @@ export default function App() {
                             <Download size={16} />
                           </a>
                           <button 
-                            onClick={() => setRecordings(prev => prev.filter(r => r.id !== rec.id))}
+                            onClick={() => deleteRecording(rec.id)}
                             className="p-2 text-zinc-400 hover:text-red-600 hover:bg-red-50 rounded-lg"
                           >
                             <Trash2 size={16} />
@@ -401,7 +502,7 @@ export default function App() {
               <div className="flex items-center gap-4 text-[9px] font-bold uppercase tracking-widest text-zinc-400">
                 <span className="flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  Local Storage: Active
+                  Cloud Sync: Active
                 </span>
                 <span className="flex items-center gap-1.5">
                   <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
