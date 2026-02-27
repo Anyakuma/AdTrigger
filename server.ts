@@ -9,6 +9,11 @@ const db = new Database(dbPath);
 
 // Initialize database
 db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS keywords (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word TEXT UNIQUE NOT NULL
@@ -24,12 +29,13 @@ db.exec(`
   );
 `);
 
-// Insert default keywords if empty
-const countKeywords = db.prepare("SELECT COUNT(*) as count FROM keywords").get() as { count: number };
-if (countKeywords.count === 0) {
-  const insertKeyword = db.prepare("INSERT INTO keywords (word) VALUES (?)");
+// Insert default keywords if not initialized
+const initialized = db.prepare("SELECT value FROM settings WHERE key = 'initialized'").get();
+if (!initialized) {
+  const insertKeyword = db.prepare("INSERT OR IGNORE INTO keywords (word) VALUES (?)");
   const defaults = ['Guinness', 'Hennessy', 'Promotion', 'Sale'];
   defaults.forEach(word => insertKeyword.run(word));
+  db.prepare("INSERT INTO settings (key, value) VALUES ('initialized', 'true')").run();
 }
 
 async function startServer() {
